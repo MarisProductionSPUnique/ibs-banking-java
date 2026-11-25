@@ -24,6 +24,7 @@ public class RequestLoggingFilter extends OncePerRequestFilter {
  if(status>=500)log.error("requestId={} method={} path={} status={} durationMs={}",id,req.getMethod(),path,status,ms);
  else if(status>=400)log.warn("requestId={} method={} path={} status={} durationMs={}",id,req.getMethod(),path,status,ms);
  else log.info("requestId={} method={} path={} status={} durationMs={}",id,req.getMethod(),path,status,ms);
+ SupportLogController.record(id,req.getMethod(),path,status,ms);
  MDC.remove("requestId");
  }
  }
