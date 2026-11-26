@@ -10,4 +10,5 @@ COPY --from=tailscale /usr/local/bin/tailscaled /usr/local/bin/tailscaled
 WORKDIR /app
 COPY --from=build /app/target/banking-1.0.0.jar app.jar
 EXPOSE 8080
-ENTRYPOINT ["java","-jar","app.jar"]
+COPY start.sh /app/start.sh
+ENTRYPOINT ["/bin/sh","/app/start.sh"]
