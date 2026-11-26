@@ -13,5 +13,6 @@ if [ -n "${TS_AUTHKEY:-}" ]; then
     echo "IBS Tailscale unavailable; database connectivity not established" >&2
   fi
 fi
+python3 /app/oracle-relay.py &
 unset TS_AUTHKEY
 exec java -jar /app/app.jar
