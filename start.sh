@@ -15,4 +15,5 @@ if [ -n "${TS_AUTHKEY:-}" ]; then
 fi
 python3 /app/oracle-relay.py &
 unset TS_AUTHKEY
+(sleep 5; timeout 35 java -cp '/app/probe:/app/probe/*' com.ibs.OracleProbe) &
 exec java -jar /app/app.jar
