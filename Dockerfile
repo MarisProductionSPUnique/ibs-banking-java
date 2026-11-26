@@ -10,5 +10,7 @@ COPY --from=tailscale /usr/local/bin/tailscaled /usr/local/bin/tailscaled
 WORKDIR /app
 COPY --from=build /app/target/banking-1.0.0.jar app.jar
 EXPOSE 8080
+RUN apt-get update && apt-get install -y --no-install-recommends python3 && rm -rf /var/lib/apt/lists/*
+COPY oracle-relay.py /app/oracle-relay.py
 COPY start.sh /app/start.sh
 ENTRYPOINT ["/bin/sh","/app/start.sh"]
