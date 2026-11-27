@@ -40,3 +40,20 @@ jobs:
           pid=$!
           trap 'kill "$pid" 2>/dev/null || true; tail -n 80 /tmp/ibs-ci.log' EXIT
           python3 tools/ibs_smoke_test.py
+      - name: Nginx proxy functional tests
+        env:
+          IBS_SUPPORT_KEY: ci-only-test-key
+          PORT: '8080'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y nginx
+          sudo systemctl stop nginx
+          sed -e 's/listen 8080;/listen 8081;/' -e 's@https://ibs-banking-appserver.onrender.com@http://127.0.0.1:8080@' -e 's@proxy_set_header Host ibs-banking-appserver.onrender.com;@proxy_set_header Host $host;@' webserver/nginx.conf | sudo tee /etc/nginx/conf.d/ibs-ci.conf >/dev/null
+          sudo nginx -t
+          sudo systemctl start nginx
+          java -jar target/banking-1.0.0.jar > /tmp/ibs-proxy-ci.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; tail -n 80 /tmp/ibs-proxy-ci.log; sudo systemctl stop nginx' EXIT
+          sed 's@http://127.0.0.1:8080@http://127.0.0.1:8081@' tools/ibs_smoke_test.py > /tmp/ibs_proxy_test.py
+          python3 /tmp/ibs_proxy_test.py
+          curl -fsS http://127.0.0.1:8081/web-health
