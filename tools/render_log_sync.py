@@ -53,7 +53,9 @@ def iso(t):
 def sync(db, name, owner, resource, key):
     end = iso(datetime.now(timezone.utc))
     row = db.execute("SELECT stamp FROM checkpoint WHERE service=?", (name,)).fetchone()
-    start = row[0] if row else iso(datetime.now(timezone.utc)-timedelta(hours=1))
+    now = datetime.now(timezone.utc)
+    floor = now-timedelta(days=29)
+    start = iso(max(floor, datetime.fromisoformat(row[0].replace("Z","+00:00"))-timedelta(minutes=10))) if row else iso(now-timedelta(hours=1))
     params = dict(ownerId=owner, resource=resource, startTime=start, endTime=end, direction="forward", limit=100)
     days = set()
     seen = set()
@@ -76,7 +78,10 @@ def sync(db, name, owner, resource, key):
         if not page.get("hasMore"):
             break
         params.update(startTime=page["nextStartTime"],endTime=page["nextEndTime"])
-    publish(db,name,datetime.now(IST).date())
+    today = datetime.now(IST).date()
+    publish(db,name,today)
+    cutoff = (today-timedelta(days=29)).isoformat()
+    db.execute("DELETE FROM logs WHERE service=? AND day<?",(name,cutoff))
     db.execute("INSERT OR REPLACE INTO checkpoint VALUES (?,?)",(name,end))
     db.commit()
 
