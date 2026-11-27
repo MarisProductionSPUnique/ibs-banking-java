@@ -31,3 +31,12 @@ jobs:
                       subprocess.run(['node','--check',f.name],check=True)
           PY
       - run: python3 -m py_compile tools/render_log_sync.py
+      - name: Functional HTTP smoke tests
+        env:
+          IBS_SUPPORT_KEY: ci-only-test-key
+          PORT: '8080'
+        run: |
+          java -jar target/banking-1.0.0.jar > /tmp/ibs-ci.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; tail -n 80 /tmp/ibs-ci.log' EXIT
+          python3 tools/ibs_smoke_test.py
