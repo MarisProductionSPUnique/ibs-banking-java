@@ -2,11 +2,28 @@
 const el=id=>document.getElementById(id);
 function node(tag,value){const n=document.createElement(tag);n.textContent=value;return n}
 async function api(path,data){const r=await fetch('/api/'+path,{cache:'no-store',...(data===undefined?{}:{method:'POST',headers:{'Content-Type':'application/json','X-IBS-Client':'IBS-DEMO'},body:JSON.stringify(data)})});if(!r.ok){const e=Error(({401:'Invalid credentials or session expired',429:'Too many login attempts. Try again later.',503:'Oracle service unavailable. Contact support.'})[r.status]||'HTTP '+r.status);e.status=r.status;throw e}return r.json()}
-function show(active){el('login').hidden=active;el('dashboard').hidden=!active;if(!active){el('accounts').replaceChildren();el('welcome').textContent='Customer dashboard'}}
-async function refresh(){el('accounts').replaceChildren();el('welcome').textContent='Customer dashboard';const a=await api('accounts');show(true);if(!a.length){el('accounts').textContent='No eligible accounts';return}el('welcome').textContent='Welcome, '+a[0].customerName;for(const x of a){const card=node('section','');card.append(node('h3',x.account),node('h2',new Intl.NumberFormat('en-IN',{style:'currency',currency:x.currency}).format(x.balance)));for(const [label,value] of Object.entries({'Customer number':x.customerNumber,'Account type':x.accountType,'Branch':x.branch,'IFSC':x.ifsc,'Status':x.status,'Opened':x.openedAt}))card.append(node('p',label+': '+value));el('accounts').append(card)}}
+let refreshVersion=0;
+function show(active){el('login').hidden=active;el('dashboard').hidden=!active;if(!active){refreshVersion++;el('accounts').replaceChildren();el('welcome').textContent='Customer dashboard'}}
+async function refresh(){
+ const version=++refreshVersion;
+ let accounts;
+ try{accounts=await api('accounts')}catch(e){if(version!==refreshVersion)return false;el('accounts').replaceChildren();el('welcome').textContent='Customer dashboard';throw e}
+ if(version!==refreshVersion)return false;
+ const cards=[];
+ for(const x of accounts){
+ const card=node('section','');
+ card.append(node('h3',x.account),node('h2',new Intl.NumberFormat('en-IN',{style:'currency',currency:x.currency}).format(x.balance)));
+ for(const [label,value] of Object.entries({'Customer number':x.customerNumber,'Account type':x.accountType,'Branch':x.branch,'IFSC':x.ifsc,'Status':x.status,'Opened':x.openedAt}))card.append(node('p',label+': '+value));
+ cards.push(card);
+ }
+ show(true);
+ el('welcome').textContent=accounts.length?'Welcome, '+accounts[0].customerName:'Customer dashboard';
+ el('accounts').replaceChildren(...(cards.length?cards:[node('p','No eligible accounts')]));
+ return true;
+}
 function fail(e){if(e.status===401)show(false);el('message').textContent=e.message}
-el('loginForm').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{await api('login',Object.fromEntries(new FormData(e.target)));e.target.reset();show(true);await refresh();el('message').textContent='Login successful'}catch(err){fail(err)}finally{b.disabled=false}};
-el('reload').onclick=()=>refresh().then(()=>el('message').textContent='Accounts refreshed').catch(fail);
-el('logout').onclick=async()=>{try{await api('logout',{});show(false);el('message').textContent='Logged out'}catch(e){fail(e)}};
+el('loginForm').onsubmit=async e=>{e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;try{refreshVersion++;await api('login',Object.fromEntries(new FormData(e.target)));e.target.reset();show(true);if(await refresh())el('message').textContent='Login successful'}catch(err){fail(err)}finally{b.disabled=false}};
+el('reload').onclick=()=>refresh().then(updated=>{if(updated)el('message').textContent='Accounts refreshed'}).catch(fail);
+el('logout').onclick=async()=>{try{refreshVersion++;el('reload').disabled=true;await api('logout',{});show(false);el('message').textContent='Logged out'}catch(e){fail(e)}finally{el('reload').disabled=false}};
 refresh().catch(e=>{show(false);if(e.status!==401)fail(e)});
 </script></body></html>
