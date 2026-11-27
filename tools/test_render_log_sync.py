@@ -38,5 +38,32 @@ class RotationTest(unittest.TestCase):
             finally:
                 collector.ROOT = original
 
+class SyncTest(unittest.TestCase):
+    def test_pagination_and_retention(self):
+        from unittest.mock import patch
+        from datetime import datetime, timedelta, timezone
+        import json, io, urllib.parse
+        now = datetime.now(timezone.utc)
+        stamp = collector.iso(now-timedelta(minutes=5))
+        checkpoint = collector.iso(now-timedelta(minutes=2))
+        event = dict(id="delayed",timestamp=stamp,message="INFO delayed",labels=[])
+        pages = [
+            dict(logs=[event],hasMore=True,nextStartTime=stamp,nextEndTime=collector.iso(now)),
+            dict(logs=[event],hasMore=False)
+        ]
+        with tempfile.TemporaryDirectory() as tmp, sqlite3.connect(":memory:") as db:
+            db.execute("CREATE TABLE logs(service TEXT,id TEXT,stamp TEXT,day TEXT,line TEXT,PRIMARY KEY(service,id))")
+            db.execute("CREATE TABLE checkpoint(service TEXT PRIMARY KEY,stamp TEXT)")
+            name = "IBS/appserver"
+            db.execute("INSERT INTO checkpoint VALUES (?,?)",(name,checkpoint))
+            db.execute("INSERT INTO logs VALUES (?,?,?,?,?)",(name,"expired","2000-01-01T00:00:00Z","2000-01-01","expired"))
+            with patch.object(collector,"ROOT",Path(tmp)), patch.object(collector.urllib.request,"urlopen",side_effect=[io.BytesIO(json.dumps(p).encode()) for p in pages]) as api:
+                collector.sync(db,name,"owner","resource","test-key")
+                self.assertEqual(api.call_count,2)
+                query = urllib.parse.parse_qs(urllib.parse.urlparse(api.call_args_list[0].args[0].full_url).query)
+                self.assertEqual(query["startTime"][0],collector.iso(now-timedelta(minutes=12)))
+                self.assertEqual(db.execute("SELECT id FROM logs").fetchall(),[("delayed",)])
+                self.assertIn("INFO delayed",(Path(tmp)/name/"application.log").read_text())
+
 if __name__ == "__main__":
     unittest.main()
