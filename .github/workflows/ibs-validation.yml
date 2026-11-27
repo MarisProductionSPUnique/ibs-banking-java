@@ -1,0 +1,66 @@
+name: IBS validation
+on:
+  push:
+    branches: [training/log-analysis-enhancements]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+      - run: mvn -B verify
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+      - name: Validate inline JavaScript
+        run: |
+          python3 - <<'PY'
+          import re, pathlib, subprocess, tempfile
+          for name in ('index.html','logs.html','monitor.html'):
+              p = pathlib.Path('src/main/resources/static') / name
+              for script in re.findall(r'<script\b[^>]*>(.*?)</script>', p.read_text(), re.S):
+                  with tempfile.NamedTemporaryFile(suffix='.js', mode='w') as f:
+                      f.write(script)
+                      f.flush()
+                      subprocess.run(['node','--check',f.name],check=True)
+          PY
+      - run: python3 -m py_compile tools/render_log_sync.py
+      - name: Functional HTTP smoke tests
+        env:
+          IBS_SUPPORT_KEY: ci-only-test-key
+          PORT: '8080'
+        run: |
+          java -jar target/banking-1.0.0.jar > /tmp/ibs-ci.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; tail -n 80 /tmp/ibs-ci.log' EXIT
+          python3 tools/ibs_smoke_test.py
+      - name: Nginx proxy functional tests
+        env:
+          IBS_SUPPORT_KEY: ci-only-test-key
+          PORT: '8080'
+        run: |
+          command -v nginx || { sudo apt-get update -qq; sudo apt-get install -y nginx; }
+          mkdir -p /tmp/ibs-nginx
+          {
+            echo 'pid /tmp/ibs-nginx/nginx.pid;'
+            echo 'error_log stderr;'
+            echo 'events {}'
+            echo 'http {'
+            echo 'client_body_temp_path /tmp/ibs-nginx/body; proxy_temp_path /tmp/ibs-nginx/proxy; fastcgi_temp_path /tmp/ibs-nginx/fastcgi; uwsgi_temp_path /tmp/ibs-nginx/uwsgi; scgi_temp_path /tmp/ibs-nginx/scgi;'
+            sed -e 's/listen 8080;/listen 127.0.0.1:18081;/' -e 's@https://ibs-banking-appserver.onrender.com@http://127.0.0.1:8080@' -e 's@proxy_set_header Host ibs-banking-appserver.onrender.com;@proxy_set_header Host $host;@' webserver/nginx.conf
+            echo '}'
+          } > /tmp/ibs-nginx/nginx.conf
+          nginx -t -c /tmp/ibs-nginx/nginx.conf -p /tmp/ibs-nginx/
+          java -jar target/banking-1.0.0.jar > /tmp/ibs-proxy-ci.log 2>&1 &
+          pid=$!
+          trap 'kill "$pid" 2>/dev/null || true; nginx -s stop -c /tmp/ibs-nginx/nginx.conf -p /tmp/ibs-nginx/ || true; tail -n 80 /tmp/ibs-proxy-ci.log; cat /tmp/ibs-nginx.log || true' EXIT
+          nginx -c /tmp/ibs-nginx/nginx.conf -p /tmp/ibs-nginx/ -g 'daemon off;' > /tmp/ibs-nginx.log 2>&1 &
+          sed 's@http://127.0.0.1:8080@http://127.0.0.1:18081@' tools/ibs_smoke_test.py > /tmp/ibs_proxy_test.py
+          python3 /tmp/ibs_proxy_test.py
+          curl -fsS http://127.0.0.1:18081/web-health
