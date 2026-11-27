@@ -12,13 +12,6 @@ import java.math.BigDecimal;
 @RequestMapping("/api")
 public class BankingApplication {
  public static void main(String[] args){SpringApplication.run(BankingApplication.class,args);}
- static class Demo {
- BigDecimal balance=new BigDecimal("25000.00");
- Map<String,Map<String,Object>> transferRequests=new HashMap<>();
- Set<String> payees=new LinkedHashSet<>();
- List<Map<String,Object>> transactions=new ArrayList<>();
- }
- Demo demo(HttpServletRequest r){HttpSession s=r.getSession(false); if(s==null||s.getAttribute("demo")==null)throw new ResponseStatusException(HttpStatus.UNAUTHORIZED,"Login required");return (Demo)s.getAttribute("demo");}
  void check(HttpServletRequest r){if(!"IBS-DEMO".equals(r.getHeader("X-IBS-Client")))throw new ResponseStatusException(HttpStatus.FORBIDDEN);}
  @GetMapping("/health") public Map<String,String> health(){return Map.of("status","UP","database","DEFERRED","application","IBS Banking");}
  private final OracleAuthentication authentication;
@@ -42,17 +35,37 @@ public class BankingApplication {
      session.setMaxInactiveInterval(900);
      session.setAttribute("customerId",customer.customerId());
      session.setAttribute("userId",customer.userId());
-     session.setAttribute("demo",new Demo());
-     return Map.of("customer",customer.username(),"bankingMode","SIMULATED");
+     
+     return Map.of("customer",customer.username(),"bankingMode","ORACLE_READ_ONLY");
    }catch(java.sql.SQLException e){
      org.slf4j.LoggerFactory.getLogger(BankingApplication.class).warn("Oracle authentication unavailable; SQLState={}, code={}",e.getSQLState(),e.getErrorCode());
      throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,"Authentication unavailable");
    }finally{loginSlots.release();}
  }
  @PostMapping("/logout") public Map<String,String> logout(HttpServletRequest r){check(r);HttpSession s=r.getSession(false);if(s!=null)s.invalidate();return Map.of("status","LOGGED_OUT");}
- @GetMapping("/accounts") public List<Map<String,Object>> accounts(HttpServletRequest r){Demo d=demo(r);synchronized(d){return List.of(Map.of("account","DEMO001","balance",d.balance,"currency","INR"));}}
- @GetMapping("/beneficiaries") public List<String> beneficiaries(HttpServletRequest r){Demo d=demo(r);synchronized(d){return List.copyOf(d.payees);}}
- @PostMapping("/beneficiaries") public Map<String,String> add(@RequestBody Map<String,String> b,HttpServletRequest r){check(r);Demo d=demo(r);String a=b.get("account");if(a==null||!a.matches("DEMO[0-9]{3}")||a.equals("DEMO001"))throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Use another DEMO account");synchronized(d){if(d.payees.size()>=50)throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Payee limit");if(!d.payees.add(a))throw new ResponseStatusException(HttpStatus.CONFLICT,"Duplicate payee");}return Map.of("account",a);}
- @PostMapping("/transfer") public Map<String,Object> transfer(@RequestBody Map<String,String> b,HttpServletRequest r){check(r);Demo d=demo(r);BigDecimal amount;try{String raw=b.get("amount");if(raw==null||!raw.matches("[0-9]{1,6}(\\.[0-9]{1,2})?"))throw new IllegalArgumentException();amount=new BigDecimal(raw);}catch(Exception e){throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Invalid amount");}String key=r.getHeader("Idempotency-Key");if(key!=null&&!key.matches("[A-Za-z0-9_-]{1,128}"))throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Invalid idempotency key");synchronized(d){if(key!=null&&d.transferRequests.containsKey(key)){Map<String,Object> prior=d.transferRequests.get(key);if(!Objects.equals(prior.get("account"),b.get("account"))||((BigDecimal)prior.get("amount")).compareTo(amount)!=0)throw new ResponseStatusException(HttpStatus.CONFLICT,"Idempotency key already used for a different transfer");return prior;}if(amount.signum()<=0||!d.payees.contains(b.get("account")))throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Invalid transfer");if(d.transactions.size()>=200)throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Demo transaction limit");String status=amount.compareTo(d.balance)>0?"FAILED":"SUCCESS";if(status.equals("SUCCESS"))d.balance=d.balance.subtract(amount);Map<String,Object> t=Map.of("reference",UUID.randomUUID().toString(),"account",b.get("account"),"amount",amount,"status",status);d.transactions.add(t);if(key!=null)d.transferRequests.put(key,t);return t;}}
- @GetMapping("/transactions") public List<Map<String,Object>> transactions(HttpServletRequest r){Demo d=demo(r);synchronized(d){return List.copyOf(d.transactions);}}
+ @GetMapping("/accounts") public List<Map<String,Object>> accounts(HttpServletRequest r, HttpServletResponse response){
+   response.setHeader("Cache-Control","no-store");
+   HttpSession session=r.getSession(false);
+   if(session==null || !(session.getAttribute("customerId") instanceof Long customerId))
+     throw new ResponseStatusException(HttpStatus.UNAUTHORIZED,"Login required");
+   String url=System.getenv("BANK_DB_URL"), user=System.getenv("BANK_DB_USER"), password=System.getenv("BANK_DB_PASSWORD");
+   if(url==null||user==null||password==null||password.isBlank())
+     throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,"Banking database unavailable");
+   java.util.Properties props=new java.util.Properties();
+   props.setProperty("user",user);props.setProperty("password",password);
+   props.setProperty("oracle.net.CONNECT_TIMEOUT","5000");props.setProperty("oracle.jdbc.ReadTimeout","10000");
+   String sql="SELECT customer_number, full_name, account_number, type_name, branch_name, ifsc_code, currency_code, available_balance, account_status, opened_at FROM IBS_APP.V_IBS_CUSTOMER_ACCOUNT WHERE customer_id = ?";
+   List<Map<String,Object>> rows=new ArrayList<>();
+   try(var conn=java.sql.DriverManager.getConnection(url,props);var stmt=conn.prepareStatement(sql)){
+     stmt.setLong(1,customerId);stmt.setQueryTimeout(5);
+     try(var rs=stmt.executeQuery()){
+       while(rs.next()) rows.add(Map.of("customerNumber",rs.getString(1),"customerName",rs.getString(2),"account",rs.getString(3),"accountType",rs.getString(4),"branch",rs.getString(5),"ifsc",rs.getString(6),"currency",rs.getString(7),"balance",rs.getBigDecimal(8),"status",rs.getString(9),"openedAt",rs.getTimestamp(10).toLocalDateTime().toString()));
+     }
+   }catch(java.sql.SQLException e){
+     org.slf4j.LoggerFactory.getLogger(BankingApplication.class).warn("Oracle account read failed; SQLState={}, code={}",e.getSQLState(),e.getErrorCode());
+     throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,"Banking database unavailable");
+   }
+   return rows;
+ }
+ @RequestMapping({"/beneficiaries","/transfer","/transactions"}) public void disabled(){throw new ResponseStatusException(HttpStatus.FORBIDDEN,"Unavailable in read-only banking mode");}
 }
