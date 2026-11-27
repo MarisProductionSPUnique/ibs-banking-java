@@ -65,5 +65,36 @@ class SyncTest(unittest.TestCase):
                 self.assertEqual(db.execute("SELECT id FROM logs").fetchall(),[("delayed",)])
                 self.assertIn("INFO delayed",(Path(tmp)/name/"application.log").read_text())
 
+class ReviewTest(unittest.TestCase):
+    def test_http_errors_and_unchanged_archive(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp, sqlite3.connect(":memory:") as db:
+            db.execute("CREATE TABLE logs(service TEXT,id TEXT,stamp TEXT,day TEXT,line TEXT,PRIMARY KEY(service,id))")
+            name = "IBS/webserver"
+            for status in (200,404,503):
+                db.execute("INSERT INTO logs VALUES (?,?,?,?,?)",(name,str(status),"2026-11-25T10:00:00Z","2026-11-25",f'"GET / HTTP/1.1" {status}'))
+            with patch.object(collector,"ROOT",Path(tmp)):
+                collector.publish(db,name,date(2026,11,27))
+                target = Path(tmp)/name/"error.log.2026-11-25.gz"
+                with gzip.open(target,"rt") as f:
+                    data = f.read()
+                self.assertIn("404",data)
+                self.assertIn("503",data)
+                self.assertNotIn("200",data)
+                inode = target.stat().st_ino
+                collector.publish(db,name,date(2026,11,27))
+                self.assertEqual(target.stat().st_ino,inode)
+
+    def test_retry(self):
+        from unittest.mock import patch
+        import io, urllib.error
+        with tempfile.TemporaryDirectory() as tmp, sqlite3.connect(":memory:") as db:
+            db.execute("CREATE TABLE logs(service TEXT,id TEXT,stamp TEXT,day TEXT,line TEXT,PRIMARY KEY(service,id))")
+            db.execute("CREATE TABLE checkpoint(service TEXT PRIMARY KEY,stamp TEXT)")
+            with patch.object(collector,"ROOT",Path(tmp)), patch.object(collector.time,"sleep"), patch.object(collector.urllib.request,"urlopen",side_effect=[urllib.error.URLError("temporary"),io.BytesIO(b'{"logs":[],"hasMore":false}')]) as api:
+                collector.sync(db,"UNIQ","owner","resource","test-key")
+                self.assertEqual(api.call_count,2)
+                self.assertIsNotNone(db.execute("SELECT stamp FROM checkpoint WHERE service='UNIQ'").fetchone())
+
 if __name__ == "__main__":
     unittest.main()
