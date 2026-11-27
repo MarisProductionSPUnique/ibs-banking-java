@@ -2,7 +2,44 @@
 import os, json, sqlite3, urllib.request, urllib.parse
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-import fcntl
+import fcntl, gzip, re
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def local_day(stamp):
+    return datetime.fromisoformat(stamp.replace("Z","+00:00")).astimezone(IST).date().isoformat()
+
+def publish(db, name, today):
+    folder = ROOT/name
+    folder.mkdir(parents=True, exist_ok=True)
+    cutoff = (today-timedelta(days=29)).isoformat()
+    buckets = {}
+    for stamp,line in db.execute("SELECT stamp,line FROM logs WHERE service=? ORDER BY stamp,id",(name,)):
+        day = local_day(stamp)
+        if day < cutoff: continue
+        kinds = ["application"]
+        if name.endswith("/webserver") and re.search(r'"(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS) .*HTTP/',line):
+            kinds = ["access"]
+        if re.search(r'\b(ERROR|FATAL|CRITICAL|Exception)\b',line,re.I):
+            kinds.append("error")
+        for kind in kinds:
+            buckets.setdefault((day,kind),[]).append(line)
+    for kind in ("application","error") + (("access",) if name.endswith("/webserver") else ()):
+        buckets.setdefault((today.isoformat(),kind),[])
+    for (day,kind),lines in buckets.items():
+        age = (today-datetime.fromisoformat(day).date()).days
+        base = folder/(kind+".log"+("" if age==0 else "."+day))
+        target = Path(str(base)+".gz") if age>=2 else base
+        tmp = Path(str(target)+".tmp")
+        opener = gzip.open if age>=2 else open
+        with opener(tmp,"wt",encoding="utf-8") as f:
+            for line in lines: f.write(line+"\n")
+        os.chmod(tmp,0o640)
+        tmp.replace(target)
+        if age>=2 and base.exists(): base.unlink()
+    for p in folder.iterdir():
+        m = re.fullmatch(r'(?:application|access|error)\.log\.(\d{4}-\d{2}-\d{2})(?:\.gz)?',p.name)
+        if m and m[1]<cutoff: p.unlink()
+
 
 ROOT = Path(os.environ.get("CLOUD_LOG_ROOT", "/home/appuser/IBS_EIMP_lab/cloud_logs"))
 SERVICES = {
@@ -30,7 +67,7 @@ def sync(db, name, owner, resource, key):
             page = json.load(response)
         for event in page["logs"]:
             stamp = event["timestamp"]
-            day = stamp[:10]
+            day = local_day(stamp)
             labels = {x["name"]:x["value"] for x in event.get("labels", [])}
             message = event["message"].replace("\r","\\r").replace("\n","\\n")
             line = stamp+" "+labels.get("level","unknown").upper()+" "+message
@@ -39,15 +76,7 @@ def sync(db, name, owner, resource, key):
         if not page.get("hasMore"):
             break
         params.update(startTime=page["nextStartTime"],endTime=page["nextEndTime"])
-    for day in days:
-        folder = ROOT/name
-        folder.mkdir(parents=True,exist_ok=True)
-        target = folder/("application-"+day+".log")
-        tmp = target.with_suffix(".tmp")
-        with tmp.open("w",encoding="utf-8") as f:
-            for (line,) in db.execute("SELECT line FROM logs WHERE service=? AND day=? ORDER BY stamp,id",(name,day)):
-                f.write(line+"\n")
-        tmp.replace(target)
+    publish(db,name,datetime.now(IST).date())
     db.execute("INSERT OR REPLACE INTO checkpoint VALUES (?,?)",(name,end))
     db.commit()
 
