@@ -2,7 +2,8 @@ FROM maven:3.9-eclipse-temurin-17 AS build
 WORKDIR /app
 COPY pom.xml .
 COPY src src
-RUN mvn -B package -DskipTests dependency:copy-dependencies -DincludeArtifactIds=ojdbc11
+RUN printf '%s\n' '<settings><mirrors><mirror><id>google-central</id><mirrorOf>central</mirrorOf><url>https://maven-central.storage-download.googleapis.com/maven2</url></mirror></mirrors></settings>' > /tmp/maven-settings.xml
+RUN mvn -s /tmp/maven-settings.xml -B package -DskipTests dependency:copy-dependencies -DincludeArtifactIds=ojdbc11
 FROM tailscale/tailscale:v1.104.7 AS tailscale
 FROM eclipse-temurin:17-jre
 COPY --from=tailscale /usr/local/bin/tailscale /usr/local/bin/tailscale
