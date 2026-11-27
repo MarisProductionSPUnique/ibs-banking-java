@@ -21,7 +21,34 @@ public class BankingApplication {
  Demo demo(HttpServletRequest r){HttpSession s=r.getSession(false); if(s==null||s.getAttribute("demo")==null)throw new ResponseStatusException(HttpStatus.UNAUTHORIZED,"Login required");return (Demo)s.getAttribute("demo");}
  void check(HttpServletRequest r){if(!"IBS-DEMO".equals(r.getHeader("X-IBS-Client")))throw new ResponseStatusException(HttpStatus.FORBIDDEN);}
  @GetMapping("/health") public Map<String,String> health(){return Map.of("status","UP","database","DEFERRED","application","IBS Banking");}
- @PostMapping("/login") public Map<String,String> login(@RequestBody Map<String,String> b,HttpServletRequest r){check(r);if(!"demo".equals(b.get("username"))||!"IBSdemo123".equals(b.get("password")))throw new ResponseStatusException(HttpStatus.UNAUTHORIZED,"Invalid demo credentials");HttpSession old=r.getSession(false);if(old!=null)old.invalidate();r.getSession(true).setAttribute("demo",new Demo());return Map.of("customer","Demo Customer");}
+ private final OracleAuthentication authentication;
+ private final java.util.concurrent.Semaphore loginSlots = new java.util.concurrent.Semaphore(2);
+ private long loginWindow = System.nanoTime();
+ private int loginAttempts;
+ public BankingApplication(OracleAuthentication authentication){this.authentication=authentication;}
+ private synchronized boolean allowLogin(){
+   long now=System.nanoTime();
+   if(now-loginWindow>=60_000_000_000L){loginWindow=now;loginAttempts=0;}
+   return ++loginAttempts<=20;
+ }
+ @PostMapping("/login") public Map<String,String> login(@RequestBody Map<String,String> b,HttpServletRequest r){
+   check(r);
+   if(!allowLogin() || !loginSlots.tryAcquire())throw new ResponseStatusException(HttpStatus.TOO_MANY_REQUESTS,"Try again later");
+   try{
+     var customer=authentication.authenticate(b.get("username"),b.get("password"))
+       .orElseThrow(()->new ResponseStatusException(HttpStatus.UNAUTHORIZED,"Invalid credentials"));
+     HttpSession old=r.getSession(false);if(old!=null)old.invalidate();
+     HttpSession session=r.getSession(true);
+     session.setMaxInactiveInterval(900);
+     session.setAttribute("customerId",customer.customerId());
+     session.setAttribute("userId",customer.userId());
+     session.setAttribute("demo",new Demo());
+     return Map.of("customer",customer.username(),"bankingMode","SIMULATED");
+   }catch(java.sql.SQLException e){
+     org.slf4j.LoggerFactory.getLogger(BankingApplication.class).warn("Oracle authentication unavailable; SQLState={}, code={}",e.getSQLState(),e.getErrorCode());
+     throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,"Authentication unavailable");
+   }finally{loginSlots.release();}
+ }
  @PostMapping("/logout") public Map<String,String> logout(HttpServletRequest r){check(r);HttpSession s=r.getSession(false);if(s!=null)s.invalidate();return Map.of("status","LOGGED_OUT");}
  @GetMapping("/accounts") public List<Map<String,Object>> accounts(HttpServletRequest r){Demo d=demo(r);synchronized(d){return List.of(Map.of("account","DEMO001","balance",d.balance,"currency","INR"));}}
  @GetMapping("/beneficiaries") public List<String> beneficiaries(HttpServletRequest r){Demo d=demo(r);synchronized(d){return List.copyOf(d.payees);}}
