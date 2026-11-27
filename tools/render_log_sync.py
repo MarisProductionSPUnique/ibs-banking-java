@@ -2,7 +2,7 @@
 import os, json, sqlite3, urllib.request, urllib.parse
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-import fcntl, gzip, re
+import fcntl, gzip, re, time, urllib.error
 IST = timezone(timedelta(hours=5, minutes=30))
 
 def local_day(stamp):
@@ -19,7 +19,7 @@ def publish(db, name, today):
         kinds = ["application"]
         if name.endswith("/webserver") and re.search(r'"(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS) .*HTTP/',line):
             kinds = ["access"]
-        if re.search(r'\b(ERROR|FATAL|CRITICAL|Exception)\b',line,re.I):
+        if re.search(r'\b(ERROR|FATAL|CRITICAL|Exception)\b',line,re.I) or re.search(r'HTTP/[^"]+"\s+[45]\d{2}\b',line):
             kinds.append("error")
         for kind in kinds:
             buckets.setdefault((day,kind),[]).append(line)
@@ -29,6 +29,13 @@ def publish(db, name, today):
         age = (today-datetime.fromisoformat(day).date()).days
         base = folder/(kind+".log"+("" if age==0 else "."+day))
         target = Path(str(base)+".gz") if age>=2 else base
+        expected = "".join(line+"\n" for line in lines)
+        if target.exists():
+            reader = gzip.open if age>=2 else open
+            with reader(target,"rt",encoding="utf-8") as existing:
+                if existing.read() == expected:
+                    if age>=2 and base.exists(): base.unlink()
+                    continue
         tmp = Path(str(target)+".tmp")
         opener = gzip.open if age>=2 else open
         with opener(tmp,"wt",encoding="utf-8") as f:
@@ -57,7 +64,6 @@ def sync(db, name, owner, resource, key):
     floor = now-timedelta(days=29)
     start = iso(max(floor, datetime.fromisoformat(row[0].replace("Z","+00:00"))-timedelta(minutes=10))) if row else iso(now-timedelta(hours=1))
     params = dict(ownerId=owner, resource=resource, startTime=start, endTime=end, direction="forward", limit=100)
-    days = set()
     seen = set()
     while True:
         cursor = (params["startTime"], params["endTime"])
@@ -65,8 +71,15 @@ def sync(db, name, owner, resource, key):
             raise RuntimeError("Repeated pagination cursor")
         seen.add(cursor)
         req = urllib.request.Request("https://api.render.com/v1/logs?"+urllib.parse.urlencode(params), headers={"Authorization":"Bearer "+key,"Accept":"application/json"})
-        with urllib.request.urlopen(req, timeout=30) as response:
-            page = json.load(response)
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=30) as response:
+                    page = json.load(response)
+                break
+            except (urllib.error.URLError, TimeoutError) as exc:
+                if isinstance(exc, urllib.error.HTTPError) and exc.code not in (429,500,502,503,504): raise
+                if attempt == 2: raise
+                time.sleep(2 ** attempt)
         for event in page["logs"]:
             stamp = event["timestamp"]
             day = local_day(stamp)
@@ -74,11 +87,14 @@ def sync(db, name, owner, resource, key):
             message = event["message"].replace("\r","\\r").replace("\n","\\n")
             line = stamp+" "+labels.get("level","unknown").upper()+" "+message
             db.execute("INSERT OR IGNORE INTO logs VALUES (?,?,?,?,?)",(name,event["id"],stamp,day,line))
-            days.add(day)
         if not page.get("hasMore"):
             break
         params.update(startTime=page["nextStartTime"],endTime=page["nextEndTime"])
     today = datetime.now(IST).date()
+    for ident,stamp,day in db.execute("SELECT id,stamp,day FROM logs WHERE service=?",(name,)).fetchall():
+        normalized = local_day(stamp)
+        if day != normalized:
+            db.execute("UPDATE logs SET day=? WHERE service=? AND id=?",(normalized,name,ident))
     publish(db,name,today)
     cutoff = (today-timedelta(days=29)).isoformat()
     db.execute("DELETE FROM logs WHERE service=? AND day<?",(name,cutoff))
